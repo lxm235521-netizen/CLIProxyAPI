@@ -96,6 +96,18 @@ func canonicalXAIVideosModel(model string) string {
 	return defaultXAIVideosModel
 }
 
+// normalizeXAIVideosModelForAuth maps all xAI video model variants to a single
+// canonical model name for auth selection. This ensures that session affinity
+// cache keys are consistent between video creation and retrieval requests,
+// regardless of which specific xAI video model was used in the request.
+func normalizeXAIVideosModelForAuth(model string) string {
+	base := videosModelBase(model)
+	if base == xaiVideos15PreviewModel {
+		return defaultXAIVideosModel
+	}
+	return canonicalXAIVideosModel(model)
+}
+
 func readVideosCreateRequest(c *gin.Context) ([]byte, error) {
 	contentType := strings.ToLower(strings.TrimSpace(c.ContentType()))
 	switch contentType {
@@ -502,9 +514,11 @@ func (h *OpenAIAPIHandler) XAIVideosRetrieve(c *gin.Context) {
 		return
 	}
 
+	model := resolveVideosRetrieveModel(c)
+
 	payload := []byte(`{}`)
 	payload, _ = sjson.SetBytes(payload, "request_id", requestID)
-	h.collectXAIVideosNative(c, payload, defaultXAIVideosModel)
+	h.collectXAIVideosNative(c, payload, model)
 }
 
 func (h *OpenAIAPIHandler) VideosRetrieve(c *gin.Context) {
@@ -519,13 +533,15 @@ func (h *OpenAIAPIHandler) VideosRetrieve(c *gin.Context) {
 		return
 	}
 
+	model := resolveVideosRetrieveModel(c)
+
 	payload := []byte(`{}`)
 	payload, _ = sjson.SetBytes(payload, "request_id", videoID)
 
 	c.Header("Content-Type", "application/json")
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
-	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, xaiVideosHandlerType, defaultXAIVideosModel, payload, "")
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, xaiVideosHandlerType, normalizeXAIVideosModelForAuth(model), payload, "")
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
@@ -537,7 +553,7 @@ func (h *OpenAIAPIHandler) VideosRetrieve(c *gin.Context) {
 		return
 	}
 
-	out, err := buildVideosRetrieveAPIResponseFromXAI(videoID, resp, defaultXAIVideosModel)
+	out, err := buildVideosRetrieveAPIResponseFromXAI(videoID, resp, model)
 	if err != nil {
 		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
 		h.WriteErrorResponse(c, errMsg)
@@ -550,12 +566,30 @@ func (h *OpenAIAPIHandler) VideosRetrieve(c *gin.Context) {
 	cliCancel(nil)
 }
 
+func resolveVideosRetrieveModel(c *gin.Context) string {
+	if model := strings.TrimSpace(c.Query("model")); model != "" {
+		return model
+	}
+	if c.Request != nil && c.Request.Method == http.MethodPost {
+		if model := strings.TrimSpace(c.PostForm("model")); model != "" {
+			return model
+		}
+		body, err := handlers.ReadRequestBody(c)
+		if err == nil && len(body) > 0 {
+			if model := strings.TrimSpace(gjson.GetBytes(body, "model").String()); model != "" {
+				return model
+			}
+		}
+	}
+	return defaultXAIVideosModel
+}
+
 func (h *OpenAIAPIHandler) collectXAIVideosNative(c *gin.Context, rawJSON []byte, model string) {
 	c.Header("Content-Type", "application/json")
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
-	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, xaiVideosHandlerType, model, rawJSON, "")
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, xaiVideosHandlerType, normalizeXAIVideosModelForAuth(model), rawJSON, "")
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
@@ -577,7 +611,7 @@ func (h *OpenAIAPIHandler) collectXAIVideosCreate(c *gin.Context, xaiReq []byte,
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
-	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, xaiVideosHandlerType, meta.Model, xaiReq, "")
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, xaiVideosHandlerType, normalizeXAIVideosModelForAuth(meta.Model), xaiReq, "")
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
